@@ -1,5 +1,7 @@
 # llm-degen-guard
 
+> [한국어 문서](README.ko.md)
+
 Model-agnostic LLM output degeneration detector — 4-signal composite scoring in a single pass.
 
 ## Install
