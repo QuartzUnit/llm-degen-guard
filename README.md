@@ -80,6 +80,10 @@ report.text_length        # input length
 | **UQLM** | Requires N generations (cost × N) | Single pass, real-time streaming |
 | **repetition_penalty** | Penalizes prompt tokens, causes incoherence | Post-generation, no side effects |
 
+## Used in
+
+- [watchdeck](https://github.com/QuartzUnit/watchdeck) — Web page monitoring with visual diffs and safety guards
+
 ## License
 
 MIT
