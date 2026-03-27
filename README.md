@@ -41,6 +41,20 @@ Four independent signals are combined into a single composite score (0.0 = norma
 
 Structural content (code, lists, tables) gets a discount factor to reduce false positives.
 
+```mermaid
+flowchart TD
+    A["📝 LLM Output"] --> B["N-gram Diversity\nweight: 0.35"]
+    A --> C["Compression Ratio\nweight: 0.30"]
+    A --> D["Substring Match\nweight: 0.20"]
+    A --> E["Line Diversity\nweight: 0.15"]
+    B --> F["Weighted\nComposite Score"]
+    C --> F
+    D --> F
+    E --> F
+    F --> G["Structural\nDiscount"]
+    G --> H["Final Score\n0.0 — 1.0"]
+```
+
 ## Streaming API
 
 ```python
