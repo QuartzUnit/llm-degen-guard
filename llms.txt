@@ -1,0 +1,74 @@
+# llm-degen-guard
+
+> Model-agnostic LLM output degeneration detector -- 4-signal composite scoring in a single pass
+
+## Purpose
+
+Detects degenerated LLM output (repetitive loops, token repetition, stalled generation) using four complementary signals combined into a single composite score. Works with any LLM provider in both streaming and batch modes. Zero external dependencies.
+
+## Capabilities
+
+- **Streaming detection**: Feed text chunks incrementally; get early degeneration alerts before wasting tokens
+- **Batch analysis**: One-shot check on complete text with per-signal breakdown
+- **4-signal scoring**: N-gram diversity, zlib compression ratio, exact substring matching, line diversity
+- **Structural awareness**: Reduces false positives on structured content (code, lists, tables) via configurable discount
+- **Configurable thresholds**: Tune signal weights, alert thresholds, and window size
+
+## Installation
+
+pip install llm-degen-guard
+
+## Quick Use
+
+### Python
+```python
+from degen_guard import DegenGuard
+
+# Batch check
+report = DegenGuard.check("some LLM output text")
+print(report.is_degenerate, report.composite_score)
+
+# Streaming check
+guard = DegenGuard()
+for chunk in llm_stream:
+    is_degen, score = guard.feed(chunk)
+    if is_degen:
+        break
+```
+
+## API Reference
+
+### DegenGuard
+- signature: `DegenGuard(window_size: int = 256, check_interval: int = 64, alert_threshold: int = 3, score_threshold: float = 0.50, structural_discount: float = 0.7)`
+- description: Main detector class. Supports streaming via `feed()` and batch via `check()`.
+
+### DegenGuard.feed
+- signature: `feed(self, text: str) -> tuple[bool, float]`
+- description: Feed a text chunk for streaming detection. Returns `(is_degenerate, composite_score)`. Score is 0.0 until enough text accumulates for the first check. Triggers degeneration when `alert_threshold` consecutive checks exceed `score_threshold`.
+- returns: `tuple[bool, float]`
+
+### DegenGuard.check
+- signature: `check(cls, text: str, window_size: int = 256, score_threshold: float = 0.50, structural_discount: float = 0.7) -> DegenReport`
+- description: Class method. One-shot batch check on complete text. Returns a detailed report with per-signal breakdown.
+- returns: `DegenReport`
+
+### DegenGuard.reset
+- signature: `reset(self) -> None`
+- description: Reset internal streaming state for reuse.
+- returns: `None`
+
+### DegenReport
+- signature: `DegenReport(is_degenerate: bool, composite_score: float, signals: tuple[SignalDetail, ...] = (), text_length: int = 0, structural_penalty: float = 1.0)`
+- description: Frozen dataclass containing the result of a batch check. `composite_score` ranges from 0.0 (normal) to 1.0 (degenerate). `structural_penalty` < 1.0 indicates structured content was detected.
+- returns: N/A (dataclass)
+
+### SignalDetail
+- signature: `SignalDetail(name: str, raw_score: float, weight: float, weighted_score: float)`
+- description: Frozen dataclass for an individual signal result. `name` is one of: `ngram_diversity`, `compression_ratio`, `substring_match`, `line_diversity`.
+- returns: N/A (dataclass)
+
+## Links
+
+- Docs: https://github.com/QuartzUnit/llm-degen-guard
+- PyPI: https://pypi.org/project/llm-degen-guard/
+- Source: https://github.com/QuartzUnit/llm-degen-guard
