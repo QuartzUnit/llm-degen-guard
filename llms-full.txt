@@ -1,0 +1,546 @@
+# llm-degen-guard
+
+> Model-agnostic LLM output degeneration detector -- 4-signal composite scoring in a single pass
+
+## Purpose
+
+Detects degenerated LLM output (repetitive loops, token repetition, stalled generation) using four complementary signals combined into a single composite score. Works with any LLM provider in both streaming and batch modes. Zero external dependencies -- uses only Python stdlib (zlib, dataclasses).
+
+Typical degeneration patterns caught:
+- Repeated words: `"hello hello hello hello ..."`
+- Phrase loops: `"The quick brown fox. The quick brown fox. ..."`
+- Character loops: `"aaaaaaaaaa..."`
+- Stalled structured repetition: duplicate list items, repeated table rows
+- Near-repeats with slight variation: `"Step 1: Process. Step 2: Process. Step 1: Process. ..."`
+
+## Capabilities
+
+- **Streaming detection**: Feed text chunks incrementally; get early degeneration alerts before wasting tokens
+- **Batch analysis**: One-shot check on complete text with per-signal breakdown
+- **4-signal scoring**: N-gram diversity, zlib compression ratio, exact substring matching, line diversity
+- **Structural awareness**: Reduces false positives on structured content (code, lists, tables) via configurable discount
+- **Configurable thresholds**: Tune signal weights, alert thresholds, and window size
+- **Buffer management**: Internal buffer capped at 2x window_size to prevent unbounded memory growth
+- **Reusable instances**: Call reset() to reuse a streaming guard for the next stream
+- **Minimum text guard**: Returns score 0.0 for texts shorter than 10 characters to avoid false positives
+
+## Installation
+
+```
+pip install llm-degen-guard
+```
+
+Requires Python >= 3.9. No external dependencies.
+
+## Quick Use
+
+### Python
+
+```python
+from degen_guard import DegenGuard
+
+# Batch check
+report = DegenGuard.check("some LLM output text")
+print(report.is_degenerate, report.composite_score)
+
+# Streaming check
+guard = DegenGuard()
+for chunk in llm_stream:
+    is_degen, score = guard.feed(chunk)
+    if is_degen:
+        break
+```
+
+## API Reference
+
+### Module: degen_guard
+
+Public exports: `DegenGuard`, `DegenReport`, `SignalDetail`
+
+```python
+from degen_guard import DegenGuard, DegenReport, SignalDetail
+```
+
+---
+
+### class DegenGuard
+
+```python
+@dataclass
+class DegenGuard:
+    window_size: int = 256
+    check_interval: int = 64
+    alert_threshold: int = 3
+    score_threshold: float = 0.50
+    structural_discount: float = 0.7
+    weights: _SignalWeights = field(default_factory=_SignalWeights)
+```
+
+Main detector class. Supports streaming via `feed()` and batch via `check()`.
+
+**Constructor Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `window_size` | `int` | `256` | Number of characters to analyze in each check. The detector looks at the last `window_size` characters of accumulated text. |
+| `check_interval` | `int` | `64` | Minimum number of new characters required between consecutive checks. Prevents excessive computation on small chunks. |
+| `alert_threshold` | `int` | `3` | Number of consecutive above-threshold checks required before declaring degeneration. Higher values reduce false positives but increase detection latency. |
+| `score_threshold` | `float` | `0.50` | Minimum composite score (0.0-1.0) to count as an alert. Scores at or above this value increment the consecutive alert counter. |
+| `structural_discount` | `float` | `0.7` | Multiplier applied to composite score when structural content markers are detected (code, lists, tables). Reduces false positives on legitimate structured content. |
+| `weights` | `_SignalWeights` | `_SignalWeights()` | Signal weight configuration (see _SignalWeights below). |
+
+**Internal State (not part of constructor):**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `_buf` | `str` | Accumulated text buffer. Capped at `2 * window_size`. |
+| `_chars_since_check` | `int` | Characters received since last check. |
+| `_consecutive_alerts` | `int` | Current count of consecutive above-threshold checks. |
+| `_total_chars` | `int` | Total characters fed since creation or last reset. |
+| `_last_score` | `float` | Most recent composite score. |
+
+---
+
+### DegenGuard.feed
+
+```python
+def feed(self, text: str) -> tuple[bool, float]
+```
+
+Feed a text chunk for streaming detection.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `text` | `str` | A chunk of text from the LLM stream. Can be any size -- single tokens, words, sentences, or larger blocks. |
+
+**Returns:** `tuple[bool, float]`
+- `bool` -- `True` when degeneration is detected (i.e., `alert_threshold` consecutive checks exceeded `score_threshold`).
+- `float` -- Current composite score (0.0 to 1.0). Returns 0.0 until enough text accumulates for the first check (i.e., buffer length >= `window_size` and chars since last check >= `check_interval`).
+
+**Behavior:**
+1. Appends `text` to internal buffer.
+2. If buffer length < `window_size` or chars since last check < `check_interval`, returns `(False, last_score)` without computing.
+3. Extracts the last `window_size` characters as the analysis window.
+4. Computes 4-signal composite score on the window.
+5. If score >= `score_threshold`, increments consecutive alert counter; otherwise resets it to 0.
+6. Caps buffer at `2 * window_size` to bound memory.
+7. Returns `(consecutive_alerts >= alert_threshold, score)`.
+
+---
+
+### DegenGuard.check
+
+```python
+@classmethod
+def check(
+    cls,
+    text: str,
+    window_size: int = 256,
+    score_threshold: float = 0.50,
+    structural_discount: float = 0.7,
+) -> DegenReport
+```
+
+Class method. One-shot batch check on complete text. Returns a detailed report with per-signal breakdown.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `text` | `str` | (required) | Complete text to analyze. |
+| `window_size` | `int` | `256` | Characters to analyze (takes the last `window_size` characters if text is longer). |
+| `score_threshold` | `float` | `0.50` | Score at or above this value marks text as degenerate. |
+| `structural_discount` | `float` | `0.7` | Discount multiplier for structured content. |
+
+**Returns:** `DegenReport`
+
+**Behavior:**
+1. If `len(text) < 10`, returns a safe report (`is_degenerate=False`, `composite_score=0.0`).
+2. Extracts the last `window_size` characters (or full text if shorter).
+3. Computes detailed 4-signal scores with per-signal breakdown.
+4. Returns `DegenReport` with all fields populated.
+
+---
+
+### DegenGuard.reset
+
+```python
+def reset(self) -> None
+```
+
+Reset internal streaming state for reuse. Clears the buffer, counters, and last score. The configuration (window_size, thresholds, weights) is preserved.
+
+**Parameters:** None
+
+**Returns:** `None`
+
+---
+
+### class DegenReport
+
+```python
+@dataclass(frozen=True, slots=True)
+class DegenReport:
+    is_degenerate: bool
+    composite_score: float
+    signals: tuple[SignalDetail, ...] = field(default_factory=tuple)
+    text_length: int = 0
+    structural_penalty: float = 1.0
+```
+
+Frozen (immutable) dataclass containing the result of a batch check.
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_degenerate` | `bool` | `True` if composite_score >= score_threshold. |
+| `composite_score` | `float` | Weighted composite score, 0.0 (normal) to 1.0 (degenerate). Already includes structural penalty. |
+| `signals` | `tuple[SignalDetail, ...]` | Per-signal breakdown. Contains 4 entries when computed, empty tuple for short texts. |
+| `text_length` | `int` | Length of the original input text in characters. |
+| `structural_penalty` | `float` | Multiplier applied due to structural content detection. 1.0 = no discount, < 1.0 = structural content detected (e.g., 0.7). |
+
+---
+
+### class SignalDetail
+
+```python
+@dataclass(frozen=True, slots=True)
+class SignalDetail:
+    name: str
+    raw_score: float
+    weight: float
+    weighted_score: float
+```
+
+Frozen (immutable) dataclass for an individual signal result.
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `str` | Signal identifier. One of: `"ngram_diversity"`, `"compression_ratio"`, `"substring_match"`, `"line_diversity"`. |
+| `raw_score` | `float` | Raw signal value before weighting. 0.0 (normal) to 1.0 (degenerate). |
+| `weight` | `float` | Weight assigned to this signal. Default weights: ngram=0.35, compression=0.30, substring=0.20, line_diversity=0.15. |
+| `weighted_score` | `float` | `raw_score * weight`. The composite score is the sum of all weighted_scores times the structural penalty. |
+
+---
+
+### class _SignalWeights (internal)
+
+```python
+@dataclass
+class _SignalWeights:
+    ngram: float = 0.35
+    compression: float = 0.30
+    substring: float = 0.20
+    line_diversity: float = 0.15
+```
+
+Configurable signal weights. Should sum to 1.0. Passed via `DegenGuard(weights=_SignalWeights(...))`. Not part of the public API but accessible for advanced tuning.
+
+**Fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ngram` | `float` | `0.35` | Weight for n-gram diversity signal. |
+| `compression` | `float` | `0.30` | Weight for zlib compression ratio signal. |
+| `substring` | `float` | `0.20` | Weight for exact substring match signal. |
+| `line_diversity` | `float` | `0.15` | Weight for line diversity signal. |
+
+---
+
+### Signal Details (Internal Scoring Logic)
+
+#### Signal 1: N-gram Diversity (`ngram_diversity`)
+
+Measures the ratio of distinct 3-grams to total 3-grams in the window.
+
+- **Calculation**: `distinct_trigrams / total_trigrams`
+- **Mapping**: diversity 0.70+ maps to 0.0 (normal); diversity < 0.30 maps to 1.0 (degenerate). Linear interpolation between 0.30 and 0.70.
+- **Formula**: `max(0.0, min(1.0, (0.70 - diversity) / 0.40))`
+
+#### Signal 2: Compression Ratio (`compression_ratio`)
+
+Measures how compressible the text is using zlib (level 1).
+
+- **Calculation**: `len(zlib.compress(text.encode(), 1)) / len(text.encode())`
+- **Mapping**: ratio 0.40+ maps to 0.0 (normal); ratio < 0.20 maps to 1.0 (degenerate). Linear interpolation between 0.20 and 0.40.
+- **Formula**: `max(0.0, min(1.0, (0.40 - ratio) / 0.20))`
+
+#### Signal 3: Substring Match (`substring_match`)
+
+Checks whether the first and second halves of the window share an exact overlapping substring.
+
+- **Calculation**: Tests boundary overlap at sizes 128, 64, 32 characters. Checks if `first_half[-size:] == second_half[:size]`.
+- **Mapping**: match >= 64 chars returns 1.0; match >= 32 chars returns `match_len / 64.0`; no match returns 0.0.
+
+#### Signal 4: Line Diversity (`line_diversity`)
+
+Measures the ratio of unique non-empty lines to total non-empty lines.
+
+- **Calculation**: `unique_lines / total_lines` (after stripping whitespace, ignoring empty lines)
+- **Mapping**: diversity 0.50+ maps to 0.0 (normal); diversity < 0.30 maps to 1.0 (degenerate). Linear interpolation between 0.30 and 0.50.
+- **Formula**: `max(0.0, min(1.0, (0.50 - diversity) / 0.20))`
+- **Guard**: Returns 0.0 if fewer than 3 non-empty lines.
+
+#### Structural Penalty
+
+Applied as a final multiplier to the composite score. Returns `structural_discount` (default 0.7) if any of these markers appear in the window: `` ``` ``, `"- "`, `"| "`, `"def "`, `"class "`, `"import "`, `"    "` (4-space indent). Otherwise returns 1.0.
+
+---
+
+### Composite Score Formula
+
+```
+composite = (w_ngram * s_ngram + w_compression * s_compression
+             + w_substring * s_substring + w_line_diversity * s_line_diversity)
+             * structural_penalty
+```
+
+Where each `s_*` is in [0.0, 1.0] and weights sum to 1.0. Final composite is in [0.0, 1.0].
+
+## Examples
+
+### Example 1: Basic Batch Check
+
+```python
+from degen_guard import DegenGuard
+
+text = "The system is working properly with diverse and unique outputs."
+report = DegenGuard.check(text)
+
+print(f"Degenerate: {report.is_degenerate}")   # False
+print(f"Score: {report.composite_score:.4f}")   # ~0.0
+print(f"Text length: {report.text_length}")     # 63
+print(f"Penalty: {report.structural_penalty}")  # 1.0
+```
+
+### Example 2: Detecting Repetitive Output
+
+```python
+from degen_guard import DegenGuard
+
+degenerate_text = "hello " * 200
+report = DegenGuard.check(degenerate_text)
+
+print(f"Degenerate: {report.is_degenerate}")   # True
+print(f"Score: {report.composite_score:.4f}")   # high, close to 1.0
+```
+
+### Example 3: Inspecting Per-Signal Breakdown
+
+```python
+from degen_guard import DegenGuard
+
+report = DegenGuard.check("Step 1: do it. " * 50)
+
+for signal in report.signals:
+    print(f"  {signal.name:20s}  raw={signal.raw_score:.3f}  "
+          f"weight={signal.weight:.2f}  weighted={signal.weighted_score:.3f}")
+
+# Example output:
+#   ngram_diversity       raw=0.850  weight=0.35  weighted=0.298
+#   compression_ratio     raw=1.000  weight=0.30  weighted=0.300
+#   substring_match       raw=1.000  weight=0.20  weighted=0.200
+#   line_diversity        raw=0.000  weight=0.15  weighted=0.000
+```
+
+### Example 4: Streaming Detection with Early Exit
+
+```python
+from degen_guard import DegenGuard
+
+guard = DegenGuard()
+
+# Simulate an LLM stream that starts normal then degenerates
+normal_part = "Machine learning models have improved significantly. "
+degen_part = "bla bla bla " * 100
+
+full_text = normal_part + degen_part
+
+for i in range(0, len(full_text), 32):
+    chunk = full_text[i:i + 32]
+    is_degen, score = guard.feed(chunk)
+    if is_degen:
+        print(f"Degeneration detected at char {i}! score={score:.2f}")
+        break
+```
+
+### Example 5: Streaming with Reset for Multiple Conversations
+
+```python
+from degen_guard import DegenGuard
+
+guard = DegenGuard()
+
+# First conversation
+for chunk in first_llm_stream:
+    is_degen, score = guard.feed(chunk)
+    if is_degen:
+        cancel_stream()
+        break
+
+# Reset and reuse for second conversation
+guard.reset()
+
+for chunk in second_llm_stream:
+    is_degen, score = guard.feed(chunk)
+    if is_degen:
+        cancel_stream()
+        break
+```
+
+### Example 6: Custom Thresholds for Strict Detection
+
+```python
+from degen_guard import DegenGuard
+
+# Stricter: smaller window, lower threshold, fewer alerts needed
+guard = DegenGuard(
+    window_size=128,
+    check_interval=32,
+    alert_threshold=2,
+    score_threshold=0.40,
+)
+
+for chunk in llm_stream:
+    is_degen, score = guard.feed(chunk)
+    if is_degen:
+        break
+```
+
+### Example 7: Custom Thresholds for Batch with Lenient Structural Discount
+
+```python
+from degen_guard import DegenGuard
+
+# More lenient for code-heavy output
+report = DegenGuard.check(
+    text=code_output,
+    window_size=512,
+    score_threshold=0.60,
+    structural_discount=0.5,  # heavier discount for structured content
+)
+
+if not report.is_degenerate:
+    print("Code output looks normal")
+```
+
+### Example 8: Handling Short Texts
+
+```python
+from degen_guard import DegenGuard
+
+# Short texts are always safe (< 10 chars)
+report = DegenGuard.check("Hi")
+assert report.is_degenerate is False
+assert report.composite_score == 0.0
+assert report.signals == ()
+assert report.text_length == 2
+```
+
+### Example 9: Structured Content (Code) -- False Positive Avoidance
+
+```python
+from degen_guard import DegenGuard
+
+code = '''def fibonacci(n: int) -> list[int]:
+    if n <= 0:
+        return []
+    sequence = [0, 1]
+    for i in range(2, n):
+        sequence.append(sequence[i - 1] + sequence[i - 2])
+    return sequence
+'''
+
+report = DegenGuard.check(code)
+print(f"Degenerate: {report.is_degenerate}")       # False
+print(f"Structural penalty: {report.structural_penalty}")  # 0.7 (discount applied)
+```
+
+### Example 10: Multiple Independent Guards
+
+```python
+from degen_guard import DegenGuard
+
+# Two guards tracking different streams -- no interference
+guard_a = DegenGuard()
+guard_b = DegenGuard()
+
+for chunk_a, chunk_b in zip(stream_a, stream_b):
+    is_degen_a, _ = guard_a.feed(chunk_a)
+    is_degen_b, _ = guard_b.feed(chunk_b)
+    if is_degen_a:
+        cancel_stream_a()
+    if is_degen_b:
+        cancel_stream_b()
+```
+
+## Configuration
+
+### Default Configuration
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `window_size` | 256 | 10+ | Characters analyzed per check. Larger = more context, slower. |
+| `check_interval` | 64 | 1+ | Characters between checks. Smaller = more frequent checks. |
+| `alert_threshold` | 3 | 1+ | Consecutive alerts before flagging. Higher = fewer false positives. |
+| `score_threshold` | 0.50 | 0.0-1.0 | Score cutoff for alert. Lower = more sensitive. |
+| `structural_discount` | 0.7 | 0.0-1.0 | Score multiplier for structured content. Lower = more lenient on code/lists. |
+
+### Signal Weights (default)
+
+| Signal | Weight | Normal Range | Degenerate Range |
+|--------|--------|-------------|-----------------|
+| N-gram diversity | 0.35 | 0.70-0.95 diversity | < 0.30 diversity |
+| Compression ratio | 0.30 | 0.40-0.65 ratio | < 0.20 ratio |
+| Substring match | 0.20 | no overlap | >= 32 char overlap |
+| Line diversity | 0.15 | 0.50+ diversity | < 0.30 diversity |
+
+### Structural Content Markers
+
+The structural penalty is triggered by any of these substrings in the analysis window:
+
+- `` ``` `` (code fences)
+- `"- "` (list items)
+- `"| "` (table rows)
+- `"def "` (Python function definitions)
+- `"class "` (class definitions)
+- `"import "` (import statements)
+- `"    "` (4-space indentation)
+
+### Tuning Guide
+
+**More sensitive** (catch more degeneration, risk more false positives):
+- Lower `score_threshold` to 0.35-0.40
+- Lower `alert_threshold` to 1-2
+- Smaller `window_size` (128)
+- Smaller `check_interval` (32)
+
+**More lenient** (fewer false positives, may miss subtle degeneration):
+- Raise `score_threshold` to 0.60-0.70
+- Raise `alert_threshold` to 4-5
+- Larger `window_size` (512)
+- Lower `structural_discount` (0.4-0.5)
+
+**For code-heavy output**:
+- Lower `structural_discount` to 0.4-0.5
+- Raise `score_threshold` to 0.60
+
+### Memory Behavior
+
+- Internal buffer is capped at `2 * window_size` characters. For the default `window_size=256`, the buffer never exceeds 512 characters.
+- Each `DegenGuard` instance is fully independent -- no shared state between instances.
+
+## Links
+
+- Docs: https://github.com/QuartzUnit/llm-degen-guard
+- PyPI: https://pypi.org/project/llm-degen-guard/
+- Source: https://github.com/QuartzUnit/llm-degen-guard
+- Issues: https://github.com/QuartzUnit/llm-degen-guard/issues
+- License: MIT
+- Python: >= 3.9
+- Version: 0.1.1
