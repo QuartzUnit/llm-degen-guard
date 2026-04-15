@@ -9,7 +9,7 @@ description = "Model-agnostic LLM output degeneration detector — 4-signal comp
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
-authors = [{ name = "hmj", email = "hmj@quartzunit.com" }]
+authors = [{ name = "QuartzUnit" }]
 keywords = [
     "llm",
     "degeneration",
@@ -36,6 +36,8 @@ classifiers = [
 Homepage = "https://github.com/QuartzUnit/llm-degen-guard"
 Repository = "https://github.com/QuartzUnit/llm-degen-guard"
 Issues = "https://github.com/QuartzUnit/llm-degen-guard/issues"
+Documentation = "https://github.com/QuartzUnit/llm-degen-guard#readme"
+Changelog = "https://github.com/QuartzUnit/llm-degen-guard/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/degen_guard"]
